@@ -1,0 +1,2 @@
+"""Smilekit Telegram AI manager."""
+
