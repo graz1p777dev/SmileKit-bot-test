@@ -149,6 +149,12 @@ def foreign_price_line(zone: str) -> str | None:
     return f"Цена набора — {amount} {unit}."
 
 
+def default_payment(zone: str) -> str:
+    """Способ оплаты, если клиент сам не выбирал, — как в базе знаний:
+    Бишкек и Токмок — при получении, регионы Кыргызстана — предоплата 400 сом."""
+    return "cod" if zone in ("bishkek", "tokmok") else "prepay"
+
+
 def payment_options(zone: str) -> tuple[str, ...]:
     """Доступные способы оплаты. Пусто — условий нет, оформляет менеджер."""
     if zone in ("bishkek", "tokmok"):
@@ -166,6 +172,8 @@ DISCOUNT_AFTER = 60 * 60
 QUIET_FROM_HOUR = 22
 QUIET_TO_HOUR = 9
 QUESTIONS_PER_OFFER = 3
+# Одно нейтральное напоминание на чат не чаще чем раз в столько — без повторов после каждого «ок».
+REMINDER_NEUTRAL_EVERY = 24 * 3600
 # Если с последнего сообщения бота прошло больше — напоминать поздно: молчим до ответа клиента.
 # Ночной перенос (22:20 → 09:00) в этот срок укладывается.
 REMINDER_MAX_AGE = 16 * 3600

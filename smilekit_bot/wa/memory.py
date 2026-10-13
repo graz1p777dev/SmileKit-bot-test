@@ -58,6 +58,7 @@ class Sales(BaseModel):
     consent_at: float = 0
     consent_revoked: bool = False
     order_intent_pending: bool = False  # хотел купить, но не хватало города
+    offer_on_city: bool = False  # хотел купить ещё до того, как увидел цену: после города предложим оформить
 
 
 class Price(BaseModel):
@@ -98,6 +99,7 @@ class Wait(BaseModel):
     checkout_reminder_sent: bool = False
     stopped: bool = False   # цепочка отработала — ждём ответа клиента
     retry_after: float = 0  # напоминание не ушло — до этого времени не пробуем снова
+    last_neutral_at: float = 0  # когда уходило последнее нейтральное напоминание (не сбрасывается ответом клиента)
 
 
 class Control(BaseModel):

@@ -29,6 +29,24 @@ MATERIALS = {
     "instruction": (R.USAGE_INSTRUCTIONS, ("usage", "usage_time")),
 }
 MANAGER_PHONE_TAIL = "999000845"
+# Обещания, которых нет в условиях магазина. Ответ модели с такими словами
+# не уходит клиенту: вопрос передаётся менеджеру (разбор 13.10 — «доставка
+# бесплатная», «сохраним цену» по брони, придуманный Ноокат).
+PROMISE = re.compile(
+    r"бесплатн\w*\s+доставк|доставк\w*\s+бесплатн|включен\w*\s+в\s+цену"
+    r"|брон\w*|сохран\w*\s+(?:цен|баз|ваш)|придерж\w*|оставим\s+для\s+вас"
+    r"|ушул\s+баада\s+сакта|сакталат",
+    re.IGNORECASE,
+)
+# Отдельные пузыри, которые модель писать не должна: просьба прислать адрес или
+# телефон, номер менеджера, слово «система», два предложения сразу, обещания за
+# курьера. Такой пузырь вырезается, остальной ответ уходит (разбор 13.10).
+FORBIDDEN_BUBBLE = re.compile(
+    r"дарег\w*\s+(?:жаз|жибер)|(?:напишите|пришлите|укажите|подскажите)[^.!?]{0,25}(?:адрес|куда\s+привезти)"
+    r"|куда\s+привезти|0999\s?000\s?845|систем\w*|состав\w*\s+или\s+инструкц|инструкц\w*\s+или\s+состав"
+    r"|подтвердит\s+курьер|курьер\s+(?:дароо|сразу)",
+    re.IGNORECASE,
+)
 LEAK = re.compile(
     r"баз[аеуы]\s+знани|в\s+базе\s+нет|<NEXT_MESSAGE>|\bJSON\b"
     r"|уточн(?:ю|им)(?![а-яё])|узнаю(?![а-яё])|сообщу\s+позже|перезвон",
@@ -248,10 +266,16 @@ class Engine:
         self._merge_order_data(m, u)
         # Намерение купить, сохранённое до выяснения города, — тоже согласие.
         pending = m.sales.order_intent_pending and bool(m.geo.zone) and not zone_before
-        consent = (accept_order or explicit or pending) and u.intent != "cancel_order"
+        first = not m.presented.price
+        # Захотел купить, ещё не увидев цену и условия: это не согласие на них.
+        # Показываем презентацию и доставку, затем один раз предлагаем оформить.
+        eager = first and explicit and not accept_order
+        offer_now = (eager and bool(m.geo.zone)) or (m.sales.offer_on_city and bool(m.geo.zone) and not zone_before)
+        if eager and not m.geo.zone:
+            m.sales.offer_on_city = True
+        consent = (accept_order or (explicit and not eager) or pending) and u.intent != "cancel_order"
         collecting = m.order.status == "collecting"
 
-        first = not m.presented.price
         price_ids: list[int] = []
         if first:
             # Вопрос о цене и общий интерес («расскажите подробнее», фраза из
@@ -284,7 +308,7 @@ class Engine:
             self.store.log(m.chat_id, "checkout", "отмена", f"клиент передумал ({u.intent}) — оформление остановлено", now)
             collecting = False
             if u.intent != "price_objection":
-                turn.say("text", R.NOT_READY_ACK, "checkout", "оформление отменено клиентом")
+                turn.say("text", R.NOT_READY_ACK, "checkout", "оформление отменено клиентом", [("stop",)])
                 return
 
         if collecting:
@@ -294,8 +318,12 @@ class Engine:
                 m.price.agreed = lo.price
             self._start_checkout(m, turn, u, text, first, now)
         elif u.intent == "cancel_order":
-            m.sales.order_intent_pending = False
-            turn.say("text", R.NOT_READY_ACK, "offer", "клиент отказался оформлять")
+            m.sales.order_intent_pending = m.sales.offer_on_city = False
+            turn.say("text", R.NOT_READY_ACK, "offer", "клиент отказался оформлять", [("stop",)])
+        elif offer_now and self._may_offer(m):
+            m.sales.offer_on_city = False
+            turn.say("text", R.OFFER_FIRST, "offer", "клиент хотел купить с первого сообщения — цена и условия показаны, предлагаем оформить",
+                     [("offer", "order", R.OFFER_FIRST, m.price.offered, False)], after=answer_ids[-1:])
         elif u.intent == "price_objection" and m.order.status in ("none", "cancelled"):
             self._discount_step(m, turn, text, now)
         elif u.offer_reply == "decline_temporary" or u.intent in ("not_ready", "order_later"):
@@ -305,7 +333,8 @@ class Engine:
                 if m.sales.temporary_declines >= 2:
                     # Отдельная ветка второго отказа; обычная цепочка молчания не запускается.
                     m.wait.chain = "second_decline"
-            turn.say("text", R.NOT_READY_ACK, "offer", f"временный отказ №{m.sales.temporary_declines} — без давления")
+            quiet = [] if m.wait.chain == "second_decline" or m.wait.callback_at else [("stop",)]
+            turn.say("text", R.NOT_READY_ACK, "offer", f"временный отказ №{m.sales.temporary_declines} — без давления", quiet)
         elif answered_now and self._may_offer(m) and m.sales.answered_in_cycle + answered_now >= R.QUESTIONS_PER_OFFER:
             body = R.OFFER_FIRST if m.sales.offers_made == 0 else R.OFFER_REPEAT
             turn.say(
@@ -435,10 +464,16 @@ class Engine:
             except Exception as error:
                 self.store.log(m.chat_id, "system", "ОШИБКА", f"роль {role} не ответила: {error}", now)
                 return answer_ids, 0 if collecting else len(counted)
-            # Служебные слова в тексте — признак, что ответа нет: клиенту такое не уходит.
-            if any(LEAK.search(body) for body in written.messages):
+            # Служебные слова и выдуманные условия — признак, что ответа нет: клиенту такое не уходит.
+            if any(LEAK.search(body) or PROMISE.search(body) for body in written.messages):
                 self.store.log(m.chat_id, role, "отброшено", "в ответе служебные слова — вопрос уходит менеджеру", now)
                 written.messages, written.answered, written.unknown = [], [], list(range(1, len(rest) + 1))
+            kept = [body for body in written.messages if not FORBIDDEN_BUBBLE.search(body)]
+            if len(kept) != len(written.messages):
+                self.store.log(m.chat_id, role, "вырезано", "в ответе была просьба или обещание, которых модель давать не должна", now)
+                written.messages, written.offer = kept, ""
+                if not kept:
+                    written.answered, written.unknown = [], list(range(1, len(rest) + 1))
             written.messages = shape_bubbles(written.messages, len(rest))
             ids = [rest[n - 1].id for n in written.answered if 0 < n <= len(rest)] if written.messages else []
             unknown = [rest[n - 1] for n in written.unknown if 0 < n <= len(rest)]
@@ -488,8 +523,11 @@ class Engine:
         d, o = u.order_data, m.order
         if d.quantity and d.quantity > 0:
             o.quantity, o.quantity_assumed = d.quantity, False
-        if d.address.strip():
-            o.address = d.address.strip()
+        address = d.address.strip()
+        # Название города или области — не адрес: нужен хотя бы дом или улица с номером.
+        place_only = address.lower().strip(" .,") in (m.geo.place.lower(), m.geo.place_to.lower(), u.geo.place.lower())
+        if address and not place_only and (re.search(r"\d", address) or len(address.split()) > 3):
+            o.address = address
         digits = re.sub(r"\D", "", d.phone)
         # Номер менеджера из наших же сообщений телефоном клиента не становится.
         if 9 <= len(digits) <= 13 and not digits.endswith(MANAGER_PHONE_TAIL):
@@ -516,7 +554,10 @@ class Engine:
         m.price.agreed = m.price.agreed or m.price.offered
         if o.quantity is None:
             o.quantity, o.quantity_assumed = 1, True
-        o.payment = u.order_data.payment if u.order_data.payment in options else (o.payment if o.payment in options else "full")
+        o.payment = (
+            u.order_data.payment if u.order_data.payment in options
+            else o.payment if o.payment in options else R.default_payment(m.geo.zone)
+        )
         self.store.log(m.chat_id, "checkout", "согласие", f"«{text[:80]}» — цена {m.price.agreed}, оплата {o.payment}", now)
         self._checkout_prompt(m, turn, "клиент согласился — оформление")
 
@@ -560,7 +601,7 @@ class Engine:
         if wanted and wanted in options and wanted != o.payment:
             o.payment, changed = wanted, True
         elif o.payment not in options:
-            o.payment, changed = "full", True
+            o.payment, changed = R.default_payment(m.geo.zone), True
         if changed:
             m.price.agreed = m.price.agreed or m.price.offered
             self._checkout_prompt(m, turn, "условия изменились — пересчитано")
@@ -734,7 +775,7 @@ class Engine:
                 m.price.discount_level = effect[1]
                 m.price.offered = R.DISCOUNT_LADDER[effect[1] - 1]
             elif name == "neutral":
-                m.wait.neutral_sent_at = now
+                m.wait.neutral_sent_at = m.wait.last_neutral_at = now
             elif name == "stop":
                 m.wait.stopped = True
             elif name == "checkout_reminder":
@@ -791,7 +832,10 @@ class Engine:
                     self._discount_reminder(m, turn, "второй временный отказ, час молчания", now)
             elif not w.neutral_sent_at:
                 due = w.callback_at or w.last_bot_sent_at + R.NEUTRAL_AFTER
-                if now >= due:
+                if now >= due and w.last_neutral_at and now - w.last_neutral_at < R.REMINDER_NEUTRAL_EVERY and not w.callback_at:
+                    # Уже напоминали сегодня — второй раз после каждого «ок» не пишем.
+                    w.stopped = True
+                elif now >= due:
                     if m.geo.zone:
                         turn.say("text", R.REMINDER_NEUTRAL, "wait", "30 минут молчания — нейтральное напоминание",
                                  [("neutral",), ("offer", "order", R.REMINDER_NEUTRAL, m.price.offered, False)], reminder=True)

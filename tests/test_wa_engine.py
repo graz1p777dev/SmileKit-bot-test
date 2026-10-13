@@ -105,7 +105,8 @@ class Bot:
 
     def in_checkout(self, now: float = at(12)) -> "Bot":
         self.offered(now)
-        self.say("Да, давайте", now, intent="order_now", offer_reply="accept")
+        self.say("Да, давайте, оплачу сразу полностью", now, intent="order_now", offer_reply="accept",
+                 order_data=OrderData(payment="full"))
         return self
 
 
@@ -381,7 +382,7 @@ def test_cash_on_delivery_needs_no_receipt(bot):
 def test_cod_is_not_offered_in_regions(bot):
     bot.offered()
     bot.say("Беру, оплата при получении", at(12), intent="order_now", offer_reply="accept", order_data=OrderData(payment="cod"))
-    assert bot.mem.order.payment == "full"
+    assert bot.mem.order.payment == "prepay", "в регионах по базе знаний — предоплата 400 сом"
 
 
 # 24
@@ -472,10 +473,23 @@ def test_long_dialog_keeps_everything(bot):
 
 
 # Отдельные правила
-def test_explicit_buyer_does_not_wait_for_three_questions(bot):
+def test_eager_first_message_gets_price_and_terms_then_one_offer(bot):
+    """«Хочу купить» до того, как клиент увидел цену, — не согласие: QR сразу не уходит."""
     assert bodies(bot.say("Хочу купить, оформляйте", at(12), intent="order_now")) == [R.PRESENTATION, R.CITY_QUESTION]
     outs = bot.say("Бишкек", at(12), geo=BISHKEK)
-    assert kinds(outs) == ["text", "qr", "text"], "доставка, затем сразу оформление без фото и голосового"
+    assert kinds(outs) == ["text", "photo", "voice", "text"] and bodies(outs)[-1] == R.OFFER_FIRST
+    assert bot.mem.order.status == "none"
+    outs = bot.say("да", at(12), intent="smalltalk", offer_reply="accept")
+    assert kinds(outs) == ["text"] and "qr" not in kinds(outs), "Бишкек — оплата при получении, QR не нужен"
+    assert bot.mem.order.payment == "cod" and "адрес доставки" in bodies(outs)[0]
+
+
+def test_buyer_after_presentation_goes_straight_to_checkout(bot):
+    bot.say("Здравствуйте", at(12), intent="greeting")
+    bot.say("Ош", at(12), geo=OSH)
+    outs = bot.say("Беру, оформляйте", at(12), intent="order_now")
+    assert kinds(outs) == ["qr", "text"] and R.PREPAY_NOTE in bodies(outs)[1]
+    assert bot.mem.order.payment == "prepay"
 
 
 def test_foreign_country_gets_own_price_and_manager_for_payment(bot):
@@ -653,12 +667,13 @@ def test_address_without_checkout_is_saved_and_order_is_offered(bot):
     assert "адрес доставки" not in bodies(outs)[-1] and "номер телефона" in bodies(outs)[-1]
 
 
-def test_wish_to_buy_next_to_a_question_still_leads_to_checkout(bot):
+def test_wish_to_buy_next_to_a_question_leads_to_offer_with_saved_address(bot):
     outs = bot.say("Здравствуйте. Хочу заказать. А в каком городе вы находитесь?", at(12), intent="question", buy_now=True, questions=qs("other"))
-    assert bodies(outs)[0] == R.PRESENTATION and bodies(outs)[-1] == R.CITY_QUESTION and bot.mem.sales.order_intent_pending
+    assert bodies(outs)[0] == R.PRESENTATION and bodies(outs)[-1] == R.CITY_QUESTION
     outs = bot.say("Бишкек, 6 мкр 7/1", at(12), intent="order_data", geo=BISHKEK, order_data=OrderData(address="6 мкр 7/1"))
-    assert "qr" in kinds(outs) and "адрес доставки" not in bodies(outs)[-1]
-    assert bot.mem.order.status == "collecting"
+    assert bodies(outs)[-1] == R.OFFER_FIRST
+    outs = bot.say("да", at(12), intent="smalltalk", offer_reply="accept")
+    assert "адрес доставки" not in bodies(outs)[-1] and "номер телефона" in bodies(outs)[-1]
 
 
 def test_promise_to_find_out_is_not_sent_to_client(bot):
@@ -756,3 +771,53 @@ def test_ad_phrase_on_first_message_gets_only_the_script(bot):
 def test_specific_question_on_first_message_is_answered_before_city_question(bot):
     outs = bot.say("Здравствуйте, а брекеты не мешают?", at(12), intent="question", questions=qs("safety"))
     assert bodies(outs) == [R.PRESENTATION, "ответ[consult] на 1", R.CITY_QUESTION]
+
+
+def test_free_delivery_promise_goes_to_manager(bot):
+    bot.presented()
+    bot.brain.write = lambda role, ctx: Written(messages=["В Токмок доставка бесплатная, оплата при получении"], answered=[1])
+    assert bot.say("а доставка сколько?", at(12), intent="question", questions=qs("delivery_cost")) == []
+    assert bot.mem.control.mode == "manager"
+
+
+def test_booking_promise_goes_to_manager(bot):
+    bot.presented()
+    bot.brain.write = lambda role, ctx: Written(messages=["Бронь не предусмотрена, но сохраним цену 1290 сом"], answered=[1])
+    assert bot.say("можно забронировать без денег?", at(12), intent="question", questions=qs("payment")) == []
+    assert bot.mem.control.mode == "manager"
+
+
+def test_region_name_is_not_an_address(bot):
+    bot.say("Здравствуйте", at(12), intent="greeting")
+    bot.say("Ошская область", at(12), geo=geo("kg_other", "Ошская область", "Ошскую область"), order_data=OrderData(address="Ошская область"))
+    assert bot.mem.order.address == ""
+    outs = bot.say("беру", at(12), intent="order_now")
+    assert "адрес доставки" in bodies(outs)[-1]
+
+
+def test_not_ready_means_no_reminders(bot):
+    bot.presented(at(12))
+    assert bodies(bot.say("Напишу, когда захочу заказать", at(12), intent="not_ready")) == [R.NOT_READY_ACK]
+    assert bot.tick(at(12, 30)) == [] and bot.tick(at(14)) == [] and bot.tick(at(10, day=13)) == []
+
+
+def test_neutral_reminder_only_once_a_day(bot):
+    bot.presented(at(12))
+    assert bodies(bot.tick(at(12, 30))) == [R.REMINDER_NEUTRAL]
+    bot.say("ок", at(12, 40), intent="smalltalk")
+    bot.say("а сколько держать?", at(12, 41), intent="question", questions=qs("usage_time"))
+    assert bot.tick(at(13, 11)) == [] and bot.tick(at(15)) == [], "второго «готовы оформить?» в тот же день нет"
+
+
+def test_forbidden_bubble_is_cut_but_answer_stays(bot):
+    bot.presented()
+    bot.brain.write = lambda role, ctx: Written(
+        messages=["Да, заказать можно, товар в наличии.", "Напишите адрес, система продолжит. Номер менеджера: 0999000845."], answered=[1])
+    assert bodies(bot.say("можно заказать?", at(12), intent="question", questions=qs("how_to_order"))) == ["Да, заказать можно, товар в наличии."]
+
+
+def test_two_offers_at_once_are_cut(bot):
+    bot.presented()
+    bot.brain.write = lambda role, ctx: Written(messages=["Полоски не вредят эмали.", "Могу прислать состав или инструкцию — что интереснее?"], answered=[1], offer="composition")
+    outs = bot.say("не вредно?", at(12), intent="question", questions=qs("safety"))
+    assert bodies(outs) == ["Полоски не вредят эмали."] and bot.mem.sales.last_offer is None
