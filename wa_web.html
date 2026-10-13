@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SmileKit — диалоги бота</title>
+<style>
+  :root { --bg:#f3f1f7; --panel:#fff; --ink:#17102a; --ink2:#4e4560; --ink3:#766d88; --line:#e4dff0; --brand:#5115a4; --soft:#f1ebfa; --client:#fff; --bot:#e7dcfb; --warn:#fff4d6; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif; color:var(--ink); background:var(--bg); height:100vh; display:grid; grid-template-columns:260px minmax(0,1fr) 340px; }
+  aside, section { height:100vh; overflow:auto; }
+  aside { background:var(--panel); border-right:1px solid var(--line); padding:14px; }
+  .right { border-right:0; border-left:1px solid var(--line); }
+  h1 { font-size:15px; margin:0 0 4px; } h2 { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--ink3); margin:18px 0 8px; }
+  .hint { color:var(--ink3); font-size:12px; margin:0 0 10px; }
+  button { font:inherit; cursor:pointer; border:1px solid var(--line); background:var(--panel); color:var(--ink); border-radius:8px; padding:7px 10px; }
+  button:hover { border-color:var(--brand); } button:disabled { opacity:.5; cursor:default; }
+  .chat-btn { display:block; width:100%; text-align:left; margin-bottom:6px; }
+  .chat-btn.active { background:var(--soft); border-color:var(--brand); }
+  .chat-btn small { display:block; color:var(--ink3); }
+  .primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  section { display:flex; flex-direction:column; }
+  #feed { flex:1; overflow:auto; padding:18px 22px; display:flex; flex-direction:column; gap:8px; }
+  .msg { max-width:72%; padding:8px 11px; border-radius:12px; white-space:pre-wrap; word-wrap:break-word; box-shadow:0 1px 1px rgba(0,0,0,.06); }
+  .client { align-self:flex-end; background:var(--client); border:1px solid var(--line); }
+  .bot { align-self:flex-start; background:var(--bot); }
+  .system { align-self:center; background:transparent; box-shadow:none; color:var(--ink3); font-size:12px; text-align:center; max-width:90%; }
+  .card { align-self:center; background:var(--warn); font-size:13px; max-width:80%; }
+  .meta { display:block; font-size:11px; color:var(--ink3); margin-top:4px; }
+  .msg img { max-width:240px; border-radius:8px; display:block; } .msg audio { width:240px; display:block; }
+  .tag { font-size:11px; color:var(--brand); font-weight:600; display:block; margin-bottom:3px; }
+  #bar { border-top:1px solid var(--line); background:var(--panel); padding:10px 14px; }
+  #quick { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:8px; } #quick button { padding:4px 8px; font-size:12px; }
+  #form { display:flex; gap:8px; } #text { flex:1; font:inherit; padding:9px 11px; border:1px solid var(--line); border-radius:8px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; } td { padding:4px 0; vertical-align:top; border-bottom:1px solid var(--line); } td:first-child { color:var(--ink3); width:46%; padding-right:8px; }
+  .log { font-size:12px; border-bottom:1px solid var(--line); padding:5px 0; } .log b { color:var(--brand); font-weight:600; } .log time { color:var(--ink3); margin-right:4px; }
+  .err { color:#b91c1c; } #busy { color:var(--ink3); font-size:12px; height:16px; margin-bottom:4px; }
+  @media (max-width:1000px) { body { grid-template-columns:1fr; height:auto; } aside, section { height:auto; } #feed { min-height:50vh; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>SmileKit — диалоги бота</h1>
+  <p class="hint">Локально. В WhatsApp ничего не уходит.</p>
+  <button class="chat-btn primary" id="new">+ Новый чат — пишу сам</button>
+  <h2>Готовые диалоги</h2>
+  <p class="hint">Нажмите — бот пройдёт диалог по шагам, с настоящей моделью.</p>
+  <div id="scenarios"></div>
+  <h2>Мои чаты</h2>
+  <div id="chats"></div>
+</aside>
+
+<section>
+  <div id="feed"></div>
+  <div id="bar">
+    <div id="busy"></div>
+    <div id="quick">
+      <button data-wait="30">⏱ молчит 30 мин</button>
+      <button data-wait="60">⏱ молчит 1 час</button>
+      <button data-wait="600">⏱ молчит 10 часов</button>
+      <button data-image="receipt">🧾 прислать чек</button>
+      <button data-image="other">🖼 фото не чек</button>
+      <button data-image="unreadable">🧾 чек не читается</button>
+      <button data-act="voice">🎤 голосовое</button>
+      <button data-act="manager">👤 менеджер взял чат</button>
+      <button data-act="bot">🤖 вернуть боту</button>
+    </div>
+    <form id="form"><input id="text" placeholder="Напишите как клиент…" autocomplete="off"><button class="primary">Отправить</button></form>
+  </div>
+</section>
+
+<aside class="right">
+  <h2 style="margin-top:0">Что бот помнит</h2>
+  <table id="summary"></table>
+  <h2>Почему бот так решил</h2>
+  <div id="journal"></div>
+</aside>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let chat = null, chats = [], busy = false, scenarios = [];
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+async function post(body) {
+  const r = await fetch('/api/act', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({chat, ...body})});
+  if (!r.ok) throw new Error((await r.json()).error || 'ошибка сервера');
+}
+function setBusy(text) { busy = Boolean(text); $('busy').textContent = text || ''; document.querySelectorAll('#bar button, #scenarios button').forEach(b => b.disabled = busy); }
+
+function bubble(m) {
+  if (m.who === 'system') return `<div class="msg ${m.kind === 'card' ? 'card' : 'system'}">${m.kind === 'card' ? '<span class="tag">Карточка менеджеру</span>' : '— '}${esc(m.body)}${m.kind === 'card' ? '' : ' —'}</div>`;
+  let body = esc(m.body);
+  if (m.who === 'bot' && (m.kind === 'photo' || m.kind === 'qr')) body = `<span class="tag">${m.kind === 'qr' ? 'QR для оплаты' : 'Фото до/после'}</span><img src="/assets/${esc(m.body)}">`;
+  if (m.who === 'bot' && m.kind === 'voice') body = `<span class="tag">Голосовое: ${esc(m.body.split('/').pop())}</span><audio controls src="/assets/${esc(m.body)}"></audio>`;
+  if (m.who === 'client' && m.kind !== 'text') body = `<span class="tag">Вложение</span>${body}`;
+  return `<div class="msg ${m.who}">${body}<span class="meta">${m.time}${m.note ? ' · ' + esc(m.note) : ''}</span></div>`;
+}
+
+async function refresh() {
+  if (!chat) { $('feed').innerHTML = '<div class="msg system">Выберите готовый диалог слева или начните новый чат</div>'; return; }
+  const s = await (await fetch('/api/state?chat=' + encodeURIComponent(chat))).json();
+  $('feed').innerHTML = s.feed.map(bubble).join('') || '<div class="msg system">Напишите первое сообщение клиента</div>';
+  $('feed').scrollTop = $('feed').scrollHeight;
+  $('summary').innerHTML = Object.entries(s.summary).map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`).join('');
+  $('journal').innerHTML = s.journal.slice().reverse().map(j => `<div class="log"><time>${j.time}</time><b>${esc(j.agent)}</b> ${esc(j.event)}${j.detail ? ': ' + esc(j.detail) : ''}</div>`).join('');
+}
+function drawChats() {
+  $('chats').innerHTML = chats.map(c => `<button class="chat-btn ${c.id === chat ? 'active' : ''}" data-chat="${c.id}">${esc(c.title)}</button>`).join('') || '<p class="hint">Пока пусто</p>';
+}
+function open(title) { chat = 'chat-' + Date.now(); chats.unshift({id: chat, title}); drawChats(); refresh(); }
+
+async function run(fn, label) {
+  if (busy || !chat) return;
+  setBusy(label || 'Бот думает…');
+  try { await fn(); } catch (e) { $('busy').innerHTML = `<span class="err">${esc(e.message)}</span>`; await refresh(); busy = false; document.querySelectorAll('button').forEach(b => b.disabled = false); return; }
+  await refresh(); setBusy('');
+}
+
+async function play(n) {
+  const sc = scenarios[n];
+  open(sc.title);
+  setBusy('');
+  for (let i = 0; i < sc.lines.length; i++) {
+    const line = sc.lines[i], label = `Шаг ${i + 1} из ${sc.lines.length}…`;
+    const wait = line.match(/^\+(\d+)/), receipt = line.match(/^\[чек (\d+)\]/);
+    if (wait) await run(() => post({action:'wait', minutes:+wait[1]}), label);
+    else if (receipt) await run(() => post({action:'image', kind:'receipt', amount:+receipt[1]}), label);
+    else await run(() => post({action:'text', text:line}), label);
+    if ($('busy').querySelector('.err')) return;
+  }
+}
+
+$('new').onclick = () => { open('Чат ' + (chats.length + 1)); $('text').focus(); };
+$('chats').onclick = (e) => { const b = e.target.closest('[data-chat]'); if (b && !busy) { chat = b.dataset.chat; drawChats(); refresh(); } };
+$('scenarios').onclick = (e) => { const b = e.target.closest('[data-n]'); if (b && !busy) play(+b.dataset.n); };
+$('form').onsubmit = (e) => { e.preventDefault(); const text = $('text').value.trim(); if (!text) return; if (!chat) open('Чат ' + (chats.length + 1)); $('text').value = ''; run(() => post({action:'text', text})); };
+$('quick').onclick = (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  if (b.dataset.wait) run(() => post({action:'wait', minutes:+b.dataset.wait}), 'Идёт время…');
+  else if (b.dataset.image === 'receipt') { const a = prompt('Сумма на чеке', '1490'); if (a) run(() => post({action:'image', kind:'receipt', amount:+a})); }
+  else if (b.dataset.image) run(() => post({action:'image', kind:b.dataset.image}));
+  else run(() => post({action:b.dataset.act}));
+};
+
+(async () => {
+  const data = await (await fetch('/api/scenarios')).json();
+  scenarios = data.scenarios;
+  $('scenarios').innerHTML = scenarios.map((s, n) => `<button class="chat-btn" data-n="${n}">${esc(s.title)}<small>${s.lines.length} шагов</small></button>`).join('');
+  if (!data.ready) $('busy').innerHTML = '<span class="err">Нет ключа модели — бот не сможет отвечать</span>';
+  drawChats(); refresh();
+})();
+</script>
+</body>
+</html>
