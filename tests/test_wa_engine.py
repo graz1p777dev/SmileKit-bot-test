@@ -821,3 +821,13 @@ def test_two_offers_at_once_are_cut(bot):
     bot.brain.write = lambda role, ctx: Written(messages=["Полоски не вредят эмали.", "Могу прислать состав или инструкцию — что интереснее?"], answered=[1], offer="composition")
     outs = bot.say("не вредно?", at(12), intent="question", questions=qs("safety"))
     assert bodies(outs) == ["Полоски не вредят эмали."] and bot.mem.sales.last_offer is None
+
+
+def test_returning_client_with_ad_keyword_is_not_left_in_silence(bot):
+    bot.engine.seed(CHAT, has_history=True, order_placed=False, now=at(12))
+    assert bodies(bot.say("Улыбка", at(12), intent="other")) == ["Здравствуйте! 😊 Конечно, я на связи. Что подсказать?", R.CITY_QUESTION]
+
+
+def test_returning_client_with_known_city_gets_only_greeting(bot):
+    bot.presented()
+    assert bodies(bot.say("Улыбка", at(12), intent="greeting")) == ["Здравствуйте! 😊 Конечно, я на связи. Что подсказать?"]

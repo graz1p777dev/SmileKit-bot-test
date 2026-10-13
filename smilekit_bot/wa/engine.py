@@ -349,8 +349,12 @@ class Engine:
             # начатое прежним ботом): данные сохранены, спрашиваем согласие.
             turn.say("text", R.OFFER_FIRST, "offer", "клиент прислал данные для заказа без оформления — предлагаем оформить",
                      [("offer", "order", R.OFFER_FIRST, m.price.offered, False)], after=answer_ids[-1:])
-        elif u.intent == "greeting" and not turn.out:
+        elif u.intent in ("greeting", "other") and not turn.out:
+            # Клиент что-то написал, а сказать нечего — молчать нельзя. Так было
+            # с «Улыбка» у вернувшихся клиентов: слово не распознано, ответа нет.
             turn.say("text", RETURNING_GREETING, "consult", "приветствие в уже идущем диалоге — без презентации")
+            if not m.geo.zone:
+                turn.say("text", R.CITY_QUESTION, "contact", "город всё ещё неизвестен — спрашиваем")
 
     # ── География и блок материалов ────────────────────────────────────────
 
